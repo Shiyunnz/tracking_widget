@@ -52,6 +52,13 @@ function saveCache(data) {
 // ===================================================
 // HELPER: 检查今日是否还有未完成提醒（有未完成 => dailyDone = false）
 // ===================================================
+function formatDateKey(d) {
+  const y = d.getFullYear();
+  const m = (d.getMonth()+1).toString().padStart(2,'0');
+  const day = d.getDate().toString().padStart(2,'0');
+  return `${y}-${m}-${day}`;
+}
+
 async function checkDailyReminders(debug = true) {
   const start = new Date(); start.setHours(0,0,0,0)
   const end = new Date(start); end.setDate(start.getDate() + 1)
@@ -87,7 +94,20 @@ async function checkDailyReminders(debug = true) {
     })
     console.log(`[DailyHabit] dailyDone(无未完成且至少有1个今日任务): ${dailyDone}`)
   }
-  saveCache({ dailyDone, timestamp: Date.now(), countToday: todayReminders.length, incomplete: incomplete.length })
+  // 读取并合并历史
+  const todayKey = formatDateKey(start)
+  const existing = loadCache() || {}
+  const hist = existing.history || {}
+  hist[todayKey] = dailyDone
+  const merged = {
+    ...existing,
+    dailyDone,
+    timestamp: Date.now(),
+    countToday: todayReminders.length,
+    incomplete: incomplete.length,
+    history: hist
+  }
+  saveCache(merged)
   return dailyDone
 }
 
@@ -122,6 +142,11 @@ const gridStack = gridContainer.addStack()
 gridStack.layoutVertically()
 gridStack.spacing = CIRCLE_SPACING
 
+// 加载历史完成记录（用于给过去的天着色）
+const CACHE_DATA_FOR_DRAW = loadCache() || {}
+const HISTORY = CACHE_DATA_FOR_DRAW.history || {}
+const TODAY_ZERO = new Date(); TODAY_ZERO.setHours(0,0,0,0)
+
 for (let row = 0; row < ROWS; row++) {
   const rowStack = gridStack.addStack()
   rowStack.layoutHorizontally()
@@ -130,19 +155,25 @@ for (let row = 0; row < ROWS; row++) {
   for (let col = 0; col < COLUMNS; col++) {
     const day = row * COLUMNS + col + 1
     if (day > DAYS_TOTAL) continue
-
     const circle = rowStack.addText("●")
     circle.font = Font.systemFont(CIRCLE_SIZE)
-    
-    if (day < DAYS_SINCE_START + 1) {
-      circle.textColor = COLOR_FILLED
-    } else {
-      circle.textColor = COLOR_UNFILLED
-    }
 
-    // 特别标记今天
-    if (day === DAYS_SINCE_START + 1) {
+    const dayDate = new Date(START_DATE.getTime() + (day-1)*MS_PER_DAY)
+    const dayKey = formatDateKey(dayDate)
+
+    if (dayDate < TODAY_ZERO) {
+      // 过去日期：若记录为完成则红色，否则填充白色
+      if (HISTORY[dayKey]) {
+        circle.textColor = COLOR_TODAY_DONE
+      } else {
+        circle.textColor = COLOR_FILLED
+      }
+    } else if (dayDate.getTime() === TODAY_ZERO.getTime()) {
+      // 今天：根据当前 dailyDone 状态
       circle.textColor = dailyDone ? COLOR_TODAY_DONE : COLOR_TODAY_TODO
+    } else {
+      // 未来
+      circle.textColor = COLOR_UNFILLED
     }
     
     if (col < COLUMNS - 1) rowStack.addSpacer(CIRCLE_SPACING)
