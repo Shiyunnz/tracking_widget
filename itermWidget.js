@@ -27,8 +27,8 @@ const COLORS = {
 };
 
 // TODO: PLEASE SET THESE VALUES
-const NAME = 'TODO';
-const TEMP_UNIT = 'imperial'; //set to metric for Celsius or to imperial for Fahrenheit
+const NAME = 'Shiyunnz';
+const TEMP_UNIT = 'metric'; // 设置为 'metric' 显示摄氏度 (C)，'imperial' 为华氏度 (F)
 const WEATHER_API_KEY = 'TODO'; // https://home.openweathermap.org/api_keys (account needed)
 const WORK_CALENDAR_NAME = '学习';
 const PERSONAL_CALENDAR_NAME = '个人';
@@ -189,15 +189,16 @@ function createWidget(data) {
   inputLine.textColor = Color.white();
   inputLine.font = new Font(FONT_NAME, FONT_SIZE);
 
-  // Line 2 - Next Personal Calendar Event
-  const nextPersonalCalendarEventLine = stack.addText(`🗓 | ${getCalendarEventTitle(data.nextPersonalEvent, false)}`);
-  nextPersonalCalendarEventLine.textColor = new Color(COLORS.personalCalendar);
-  nextPersonalCalendarEventLine.font = new Font(FONT_NAME, FONT_SIZE);
+  // Line 2 - All calendars today's events summary
+  const eventsSummaryLine = stack.addText(`🗓 | ${formatEventsSummary(data.todayEvents)}`);
+  eventsSummaryLine.textColor = new Color(COLORS.personalCalendar);
+  eventsSummaryLine.font = new Font(FONT_NAME, FONT_SIZE);
 
-  // Line 3 - Next Work Calendar Event
-  const nextWorkCalendarEventLine = stack.addText(`🗓 | ${getCalendarEventTitle(data.nextWorkEvent, true)}`);
-  nextWorkCalendarEventLine.textColor = new Color(COLORS.workCalendar);
-  nextWorkCalendarEventLine.font = new Font(FONT_NAME, FONT_SIZE);
+  // Line 3 - Today's reminders summary (all lists)
+  const remindersSummaryText = getAllRemindersSummaryText(data.allRemindersSummary);
+    const remindersSummaryLine = stack.addText(`📌 | ${remindersSummaryText}`);
+  remindersSummaryLine.textColor = new Color(COLORS.workCalendar);
+  remindersSummaryLine.font = new Font(FONT_NAME, FONT_SIZE);
 
   // Line 4 - Weather
   const weatherLine = stack.addText(`${data.weather.icon} | ${data.weather.temperature}° (${data.weather.high}°-${data.weather.low}°), ${data.weather.description}, feels like ${data.weather.feelsLike}°`);
@@ -229,9 +230,12 @@ async function fetchData() {
   // Get the weather data
   const weather = await fetchWeather();
 
-  // Get next work/personal calendar events
-  const nextWorkEvent = await fetchNextCalendarEvent(WORK_CALENDAR_NAME);
-  const nextPersonalEvent = await fetchNextCalendarEvent(PERSONAL_CALENDAR_NAME);
+  // Get all today's events across all calendars
+  const todayEvents = await fetchTodayEventsAllCalendars();
+
+  // Reminders fallback (still reused for no-event situation)
+  const personalReminderSummary = await fetchDueTodayReminderSummary(PERSONAL_CALENDAR_NAME);
+  const allRemindersSummary = await fetchDueTodayRemindersAll();
 
   // Get last data update time (and set)
   const lastUpdated = await getLastUpdated();
@@ -239,8 +243,9 @@ async function fetchData() {
 
   return {
     weather,
-    nextWorkEvent,
-    nextPersonalEvent,
+  todayEvents,
+  personalReminderSummary,
+  allRemindersSummary,
     device: {
       battery: Math.round(Device.batteryLevel() * 100),
       brightness: Math.round(Device.screenBrightness() * 100),
@@ -293,8 +298,8 @@ async function fetchWeather() {
 
   if (!finalResult) {
     const cached = await cache.read(CACHE_KEY_WEATHER, 30);
-    if (cached) {
-      console.log('[Weather] Using cached weather');
+    if (cached && cached.unit === TEMP_UNIT) {
+      console.log('[Weather] Using cached weather (unit match)');
       return cached;
     }
     finalResult = {
@@ -307,10 +312,12 @@ async function fetchWeather() {
       low: '?',
       feelsLike: '?',
       sunriseStr: '--:--',
-      sunsetStr: '--:--'
+      sunsetStr: '--:--',
+      unit: TEMP_UNIT
     };
   }
 
+  finalResult.unit = TEMP_UNIT; // 记录单位以便下次校验
   cache.write(CACHE_KEY_WEATHER, finalResult);
   return finalResult;
 }
@@ -322,6 +329,25 @@ function formatTimeHM(ts) {
   f.useNoDateStyle();
   f.useShortTimeStyle();
   return f.string(d);
+}
+
+function capitalize(str) {
+  if (!str || typeof str !== 'string') return str;
+  return str.split(' ').map(s=> s.charAt(0).toUpperCase() + s.slice(1)).join(' ');
+}
+
+function getOpenMeteoDescription(code) {
+  const map = {
+    0:'Clear sky',1:'Mainly clear',2:'Partly cloudy',3:'Overcast',
+    45:'Fog',48:'Rime fog',51:'Light drizzle',53:'Moderate drizzle',55:'Dense drizzle',
+    56:'Light freezing drizzle',57:'Dense freezing drizzle',
+    61:'Slight rain',63:'Moderate rain',65:'Heavy rain',66:'Light freezing rain',67:'Heavy freezing rain',
+    71:'Slight snow',73:'Moderate snow',75:'Heavy snow',77:'Snow grains',
+    80:'Slight rain showers',81:'Moderate rain showers',82:'Violent rain showers',
+    85:'Slight snow showers',86:'Heavy snow showers',
+    95:'Thunderstorm',96:'Thunderstorm (slight hail)',99:'Thunderstorm (heavy hail)'
+  };
+  return map[code] || 'Weather';
 }
 
 async function fetchWeatherOpenWeather(location, cityState) {
@@ -336,17 +362,19 @@ async function fetchWeatherOpenWeather(location, cityState) {
     const sunrise = cur.sunrise || today?.sunrise;
     const sunset = cur.sunset || today?.sunset;
     const isNight = sunrise && sunset ? (currentTime >= sunset || currentTime <= sunrise) : false;
+    const detailedDesc = (cur.weather && cur.weather[0] && cur.weather[0].description) ? capitalize(cur.weather[0].description) : (cur.weather[0].main || 'Weather');
     return {
       location: cityState,
       icon: getWeatherEmoji(cur.weather[0].id, isNight),
-      description: cur.weather[0].main || 'Weather',
+      description: detailedDesc,
       temperature: typeof cur.temp === 'number' ? Math.round(cur.temp) : '?',
       wind: typeof cur.wind_speed === 'number' ? Math.round(cur.wind_speed) : '?',
       high: today?.temp?.max ? Math.round(today.temp.max) : '?',
       low: today?.temp?.min ? Math.round(today.temp.min) : '?',
       feelsLike: typeof cur.feels_like === 'number' ? Math.round(cur.feels_like) : '?',
       sunriseStr: formatTimeHM(sunrise),
-      sunsetStr: formatTimeHM(sunset)
+  sunsetStr: formatTimeHM(sunset),
+  unit: TEMP_UNIT
     };
   } catch(e) {
     console.log('[Weather] OpenWeather failed: ' + e);
@@ -367,17 +395,20 @@ async function fetchWeatherOpenMeteo(location, cityState) {
     const sunrise = daily.sunrise ? Math.floor(new Date(daily.sunrise[0]).getTime()/1000) : null;
     const sunset = daily.sunset ? Math.floor(new Date(daily.sunset[0]).getTime()/1000) : null;
     const isNight = sunrise && sunset ? (Date.now()/1000 >= sunset || Date.now()/1000 <= sunrise) : false;
+    const code = Array.isArray(daily.weather_code) ? daily.weather_code[0] : current.weather_code;
+    const mappedDesc = getOpenMeteoDescription(code);
     return {
       location: cityState,
       icon: isNight ? '🌙' : '☀️',
-      description: 'Weather',
+      description: mappedDesc,
       temperature: typeof current.temperature_2m === 'number' ? Math.round(current.temperature_2m) : '?',
       wind: typeof current.wind_speed_10m === 'number' ? Math.round(current.wind_speed_10m) : '?',
       high,
       low,
       feelsLike: typeof current.apparent_temperature === 'number' ? Math.round(current.apparent_temperature) : '?',
       sunriseStr: formatTimeHM(sunrise),
-      sunsetStr: formatTimeHM(sunset)
+  sunsetStr: formatTimeHM(sunset),
+  unit: TEMP_UNIT
     };
   } catch(e) {
     console.log('[Weather] Open-Meteo failed: ' + e);
@@ -467,10 +498,29 @@ async function fetchNextCalendarEvent(calendarName) {
 
   const upcomingEvents = events
     .concat(tomorrow)
-    .filter(e => (new Date(e.endDate)).getTime() >= (new Date()).getTime())
-    .filter(e => e.attendees && e.attendees.some(a => a.isCurrentUser && a.status === 'accepted'));
+    .filter(e => (new Date(e.endDate)).getTime() >= Date.now());
 
-  return upcomingEvents ? upcomingEvents[0] : null;
+  // Sort by start time to ensure earliest upcoming event is chosen
+  const sorted = upcomingEvents.sort((a,b)=> (new Date(a.startDate)) - (new Date(b.startDate)));
+  return sorted.length ? sorted[0] : null;
+}
+
+/**
+ * Fetch all today's events (across every calendar available) starting now until end of day, sorted by start time.
+ */
+async function fetchTodayEventsAllCalendars() {
+  try {
+    const events = await CalendarEvent.today(); // all calendars
+    const now = Date.now();
+    const upcoming = events
+      .filter(e => (new Date(e.endDate)).getTime() >= now)
+      .sort((a,b)=> (new Date(a.startDate)) - (new Date(b.startDate)));
+    console.log(`[Calendar] Total today events (all calendars): ${events.length}, upcoming: ${upcoming.length}`);
+    return upcoming;
+  } catch(e) {
+    console.log('[Calendar] fetchTodayEventsAllCalendars failed: ' + e);
+    return [];
+  }
 }
 
 /**
@@ -494,7 +544,98 @@ function getCalendarEventTitle(calendarEvent, isWorkEvent) {
   return `[${timeFormatter.string(eventTime)}] ${calendarEvent.title}`;
 }
 
+/**
+ * Format multiple events into a concise summary line.
+ */
+function formatEventsSummary(events, max=3) {
+  if (!events || !events.length) return 'No events today';
+  const timeFormatter = new DateFormatter();
+  timeFormatter.locale = 'en';
+  timeFormatter.useNoDateStyle();
+  timeFormatter.useShortTimeStyle();
+  const parts = events.slice(0, max).map(ev => `[${timeFormatter.string(new Date(ev.startDate))}] ${truncateTitle(ev.title, 12)}`);
+  const more = events.length > max ? ` +${events.length - max}` : '';
+  return parts.join(', ') + more;
+}
+
+function truncateTitle(title, maxLen) {
+  if (!title) return '';
+  return title.length > maxLen ? title.slice(0, maxLen-1) + '…' : title;
+}
+
 // Period feature removed.
+
+//-------------------------------------
+// Reminder Helper Functions (Hybrid Fallback)
+//-------------------------------------
+
+/**
+ * Fetch summary of due-today reminders for a given list (by matching calendarName as list name).
+ * Returns { total, completed } or null if list not found/none due.
+ */
+async function fetchDueTodayReminderSummary(listName) {
+  if (!listName || listName === 'TODO') return null;
+  try {
+    const all = await Reminder.all();
+    const today = new Date();
+    const y = today.getFullYear();
+    const m = today.getMonth();
+    const d = today.getDate();
+    const start = new Date(y, m, d, 0, 0, 0, 0);
+    const end = new Date(y, m, d, 23, 59, 59, 999);
+    const filtered = all.filter(r => {
+      if (!r.dueDate) return false;
+      if (r.calendar && r.calendar.title !== listName) return false;
+      const due = r.dueDate;
+      return due >= start && due <= end;
+    });
+    if (!filtered.length) return { total: 0, completed: 0 };
+    const completed = filtered.filter(r => r.isCompleted).length;
+    return { total: filtered.length, completed };
+  } catch(e) {
+    console.log('[Reminders] fetchDueTodayReminderSummary failed: ' + e);
+    return null;
+  }
+}
+
+/**
+ * Aggregate all reminders due today across every list.
+ */
+async function fetchDueTodayRemindersAll() {
+  try {
+    const all = await Reminder.all();
+    const today = new Date();
+    const y = today.getFullYear();
+    const m = today.getMonth();
+    const d = today.getDate();
+    const start = new Date(y, m, d, 0, 0, 0, 0);
+    const end = new Date(y, m, d, 23, 59, 59, 999);
+    const dueToday = all.filter(r => r.dueDate && r.dueDate >= start && r.dueDate <= end);
+    const completed = dueToday.filter(r => r.isCompleted).length;
+    return { total: dueToday.length, completed };
+  } catch(e) {
+    console.log('[Reminders] fetchDueTodayRemindersAll failed: ' + e);
+    return { total: 0, completed: 0 };
+  }
+}
+
+/**
+ * Format reminder summary into terminal-like text.
+ */
+function getReminderSummaryText(summary, isWork) {
+  if (!summary) return `No ${isWork ? 'work ' : ''}items today`;
+  if (summary.total === 0) return `No ${isWork ? 'work ' : ''}reminders due today`;
+  const remaining = summary.total - summary.completed;
+  if (remaining === 0) return `${isWork ? 'Work ' : ''}All done today ✔`; 
+  return `${isWork ? 'Work ' : ''}Reminders ${summary.completed}/${summary.total}`;
+}
+
+function getAllRemindersSummaryText(summary) {
+  if (!summary) return 'No data';
+  if (summary.total === 0) return 'No tasks due today';
+  if (summary.total === summary.completed) return 'All tasks done ✔';
+  return `Tasks ${summary.completed}/${summary.total}`;
+}
 
 //-------------------------------------
 // Misc. Helper Functions
